@@ -372,7 +372,10 @@ class MegaHandler:
 
     async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
         """Download from Mega using megadl CLI tool"""
-        cmd = ["megadl", "--no-ask-password", "--path", dest, url]
+        cmd = ["megadl", "--path", dest]
+        if MEGA_EMAIL and MEGA_PASSWORD:
+            cmd.extend(["-u", MEGA_EMAIL, "-p", MEGA_PASSWORD])
+        cmd.append(url)
         
         env = os.environ.copy()
         if proxy:
