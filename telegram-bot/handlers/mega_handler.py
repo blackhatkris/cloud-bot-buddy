@@ -6,7 +6,7 @@ import subprocess
 import logging
 from pyrogram import Client
 from pyrogram.types import Message
-from config import MAX_FILE_SIZE_MB, DOWNLOAD_DIR
+from config import MAX_FILE_SIZE_MB, DOWNLOAD_DIR, MEGA_EMAIL, MEGA_PASSWORD
 from handlers.proxy_rotator import ProxyRotator
 
 logger = logging.getLogger(__name__)
@@ -145,10 +145,15 @@ class MegaHandler:
         )
 
     async def _get_folder_file_list(self, mega_link: str) -> list:
-        """Use megadl --path /dev/null --print-names or megals to list files"""
+        """Use megals to list files in folder"""
         try:
+            cmd = ["megals", "-l", "--human"]
+            if MEGA_EMAIL and MEGA_PASSWORD:
+                cmd.extend(["-u", MEGA_EMAIL, "-p", MEGA_PASSWORD])
+            cmd.append(mega_link)
+            
             proc = await asyncio.create_subprocess_exec(
-                "megals", "-l", "--human", "-n", mega_link,
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -367,7 +372,10 @@ class MegaHandler:
 
     async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
         """Download from Mega using megadl CLI tool"""
-        cmd = ["megadl", "--no-ask-password", "--path", dest, url]
+        cmd = ["megadl", "--path", dest]
+        if MEGA_EMAIL and MEGA_PASSWORD:
+            cmd.extend(["-u", MEGA_EMAIL, "-p", MEGA_PASSWORD])
+        cmd.append(url)
         
         env = os.environ.copy()
         if proxy:
