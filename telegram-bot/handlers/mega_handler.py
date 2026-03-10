@@ -36,8 +36,6 @@ class MegaHandler:
         self.BATCH_SIZE_MB = 200
         self.proxy_rotator = ProxyRotator()
         self.total_downloaded_mb = 0
-        # Install megatools on init
-        install_megatools()
 
     async def set_channel(self, message: Message):
         user_id = message.from_user.id
@@ -150,7 +148,7 @@ class MegaHandler:
         """Use megadl --path /dev/null --print-names or megals to list files"""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "megals", "-l", "--human", mega_link,
+                "megals", "--noprompt", "-l", "--human", mega_link,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -369,7 +367,7 @@ class MegaHandler:
 
     async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
         """Download from Mega using megadl CLI tool"""
-        cmd = ["megadl", "--path", dest, url]
+        cmd = ["megadl", "--noprompt", "--path", dest, url]
         
         env = os.environ.copy()
         if proxy:
