@@ -22,20 +22,13 @@ class MegaHandler:
         self.proxy_rotator = ProxyRotator()
         self.current_mega = None
 
-    async def _login_mega(self, use_proxy=False):
+    def _login_mega_sync(self, proxy=None):
         """Login to Mega, optionally through a proxy"""
-        if use_proxy:
-            proxy = await self.proxy_rotator.get_working_proxy(max_attempts=15)
-            if proxy:
-                logger.info(f"Using proxy: {proxy}")
-                # mega.py uses requests internally, set env proxy
-                os.environ["HTTP_PROXY"] = proxy
-                os.environ["HTTPS_PROXY"] = proxy
-                os.environ["http_proxy"] = proxy
-                os.environ["https_proxy"] = proxy
-            else:
-                logger.warning("No working proxy found, trying direct")
-                self._clear_proxy()
+        if proxy:
+            os.environ["HTTP_PROXY"] = proxy
+            os.environ["HTTPS_PROXY"] = proxy
+            os.environ["http_proxy"] = proxy
+            os.environ["https_proxy"] = proxy
         else:
             self._clear_proxy()
         
@@ -44,7 +37,6 @@ class MegaHandler:
         return self.current_mega
 
     def _clear_proxy(self):
-        """Remove proxy env vars"""
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
             os.environ.pop(key, None)
 
@@ -126,12 +118,17 @@ class MegaHandler:
         self.user_states[user_id]["state"] = "mega_confirm"
         
         channel_title = self.user_states[user_id].get("channel_title", "Unknown")
+        
+        # Detect link type
+        is_folder = "/folder/" in mega_link or "#F!" in mega_link
+        link_type = "📁 Folder" if is_folder else "📄 Single File"
+        
         await message.reply_text(
             f"📋 **Confirm Upload:**\n\n"
-            f"🔗 Link: `{mega_link[:50]}...`\n"
+            f"🔗 Link: `{mega_link[:60]}...`\n"
             f"📢 Channel: **{channel_title}**\n"
+            f"📦 Type: {link_type}\n"
             f"📏 Max file size: {MAX_FILE_SIZE_MB}MB\n"
-            f"📦 Batch: {self.BATCH_SIZE_MB}MB\n"
             f"🔄 Auto proxy rotation on quota\n\n"
             f"Send **yes** to start or **no** to cancel."
         )
@@ -155,104 +152,131 @@ class MegaHandler:
         status_msg = await message.reply_text("⏳ Loading proxies & connecting to Mega...")
         
         try:
-            # Pre-load proxies
             proxy_count = await self.proxy_rotator.fetch_proxies()
             await status_msg.edit_text(
                 f"🔄 Loaded **{proxy_count}** proxies\n"
                 f"📥 Connecting to Mega..."
             )
             
-            await self._download_and_upload(message, status_msg, mega_link, channel_id)
+            is_folder = "/folder/" in mega_link or "#F!" in mega_link
+            
+            if is_folder:
+                await self._download_folder(message, status_msg, mega_link, channel_id)
+            else:
+                await self._download_single_file(message, status_msg, mega_link, channel_id)
+                
         except Exception as e:
             await status_msg.edit_text(f"❌ Error: `{str(e)}`")
         finally:
             self._clear_proxy()
             self.user_states[user_id]["state"] = "idle"
 
-    async def _switch_to_proxy(self, status_msg: Message, retry_count: int = 0) -> bool:
-        """Switch to a new proxy when quota hits"""
-        max_retries = 20
-        
-        while retry_count < max_retries:
-            retry_count += 1
-            proxy = await self.proxy_rotator.get_working_proxy(max_attempts=5)
-            
-            if proxy is None:
-                # Refresh proxy list
-                await status_msg.edit_text("🔄 Refreshing proxy list...")
-                count = await self.proxy_rotator.fetch_proxies()
-                if count == 0:
-                    await status_msg.edit_text(
-                        "⚠️ No proxies available. Waiting 5 min and retrying..."
-                    )
-                    await asyncio.sleep(300)
-                    await self.proxy_rotator.fetch_proxies()
-                    continue
-                proxy = await self.proxy_rotator.get_working_proxy(max_attempts=5)
-                if proxy is None:
-                    continue
-            
-            await status_msg.edit_text(
-                f"🔄 Switching to proxy #{retry_count}...\n"
-                f"🌐 {proxy[:30]}..."
-            )
-            
-            try:
-                os.environ["HTTP_PROXY"] = proxy
-                os.environ["HTTPS_PROXY"] = proxy
-                os.environ["http_proxy"] = proxy
-                os.environ["https_proxy"] = proxy
-                
-                mega = Mega()
-                self.current_mega = mega.login()
-                self.total_downloaded_mb = 0
-                
-                await status_msg.edit_text(
-                    f"✅ Connected via new proxy!\n"
-                    f"🔄 Remaining proxies: {self.proxy_rotator.get_proxy_count()}"
-                )
-                return True
-                
-            except Exception as e:
-                self.proxy_rotator.mark_failed(proxy)
-                self._clear_proxy()
-                continue
-        
-        await status_msg.edit_text("❌ All proxies exhausted. Try again later.")
-        return False
-
-    async def _download_and_upload(self, message: Message, status_msg: Message, mega_link: str, channel_id: int):
-        """Download from Mega in batches with auto proxy rotation"""
+    async def _download_single_file(self, message: Message, status_msg: Message, mega_link: str, channel_id: int):
+        """Download a single file from Mega and upload"""
         user_id = message.from_user.id
         download_path = os.path.join(DOWNLOAD_DIR, str(user_id))
         os.makedirs(download_path, exist_ok=True)
         
         try:
-            # Initial login (direct, no proxy)
-            m = await self._login_mega(use_proxy=False)
+            m = self._login_mega_sync()
             
-            await status_msg.edit_text("📥 Fetching file list from Mega...")
+            await status_msg.edit_text("📥 Getting file info...")
             
-            # Get file list
-            file_list = []
-            if "/folder/" in mega_link or "#F!" in mega_link:
-                try:
-                    folder = m.find(mega_link)
-                    files = m.get_files()
-                    for file_id, file_info in files.items():
-                        if file_info['t'] == 0:
-                            file_list.append((file_id, file_info))
-                except Exception:
-                    import_result = m.import_public_url(mega_link)
-                    files = m.get_files()
-                    for file_id, file_info in files.items():
-                        if file_info['t'] == 0:
-                            file_list.append((file_id, file_info))
-            else:
+            # Get file info first
+            try:
                 file_info = m.get_public_url_info(mega_link)
-                file_list = [(None, {"a": {"n": file_info["name"]}, "s": file_info["size"]})]
+                file_name = file_info.get("name", "unknown_file")
+                file_size = file_info.get("size", 0)
+                file_size_mb = file_size / (1024 * 1024)
+            except Exception as e:
+                await status_msg.edit_text(f"❌ Could not get file info: `{str(e)}`")
+                return
+            
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                await status_msg.edit_text(
+                    f"⏭️ File `{file_name}` is {file_size_mb:.1f}MB (>{MAX_FILE_SIZE_MB}MB). Skipped."
+                )
+                return
+            
+            await status_msg.edit_text(
+                f"📥 Downloading `{file_name}` ({file_size_mb:.1f}MB)..."
+            )
+            
+            # Try download with retry + proxy rotation
+            downloaded = await self._try_download_url(m, mega_link, download_path, status_msg)
+            
+            if downloaded:
+                file_path = str(downloaded)
+                await status_msg.edit_text(f"📤 Uploading `{file_name}` to channel...")
+                
+                try:
+                    await self._upload_to_channel(channel_id, file_path, file_name)
+                    await status_msg.edit_text(
+                        f"✅ **Done!**\n\n"
+                        f"📤 Uploaded: `{file_name}` ({file_size_mb:.1f}MB)"
+                    )
+                finally:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+            else:
+                await status_msg.edit_text(f"❌ Failed to download `{file_name}`")
+        
+        finally:
+            if os.path.exists(download_path):
+                shutil.rmtree(download_path, ignore_errors=True)
+
+    async def _download_folder(self, message: Message, status_msg: Message, mega_link: str, channel_id: int):
+        """Download all files from a Mega folder and upload"""
+        user_id = message.from_user.id
+        download_path = os.path.join(DOWNLOAD_DIR, str(user_id))
+        os.makedirs(download_path, exist_ok=True)
+        
+        try:
+            m = self._login_mega_sync()
+            
+            await status_msg.edit_text("📥 Importing folder to get file list...")
+            
+            # Import the public folder to access files
+            try:
+                folder_key = m.import_public_url(mega_link)
+                files = m.get_files()
+                
+                # Filter to actual files (not folders)
+                file_list = []
+                for file_id, file_info in files.items():
+                    if isinstance(file_info, dict) and file_info.get('t', -1) == 0:
+                        file_list.append((file_id, file_info))
+                
+            except Exception as e:
+                # Alternative: try downloading folder directly
+                await status_msg.edit_text(
+                    f"📥 Trying direct folder download...\n"
+                    f"(This may take a while for large folders)"
+                )
+                
+                try:
+                    # mega.py can download entire folder
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lambda: m.download_url(mega_link, download_path))
+                    
+                    # Upload everything that was downloaded
+                    uploaded = await self._upload_pending_files(download_path, channel_id, status_msg)
+                    await status_msg.edit_text(f"✅ **Done!** Uploaded {uploaded} files.")
+                    return
+                except Exception as e2:
+                    await status_msg.edit_text(
+                        f"❌ Could not access folder.\n"
+                        f"Error: `{str(e2)}`\n\n"
+                        f"💡 Try sending individual file links instead of folder link."
+                    )
+                    return
             
             total_files = len(file_list)
+            
+            if total_files == 0:
+                await status_msg.edit_text("❌ No files found in this folder.")
+                return
+            
             uploaded = 0
             skipped = 0
             failed = 0
@@ -267,13 +291,8 @@ class MegaHandler:
             
             for idx, (file_id, file_info) in enumerate(file_list, 1):
                 try:
-                    if isinstance(file_info, dict):
-                        file_name = file_info.get('a', {}).get('n', f'file_{idx}')
-                        file_size_bytes = file_info.get('s', 0)
-                    else:
-                        file_name = getattr(file_info, 'name', f'file_{idx}')
-                        file_size_bytes = getattr(file_info, 'size', 0)
-                    
+                    file_name = file_info.get('a', {}).get('n', f'file_{idx}')
+                    file_size_bytes = file_info.get('s', 0)
                     file_size_mb = file_size_bytes / (1024 * 1024)
                     
                     # Skip files > MAX_FILE_SIZE_MB
@@ -281,23 +300,20 @@ class MegaHandler:
                         skipped += 1
                         continue
                     
-                    # Check quota limit — switch proxy before hitting it
+                    # Check quota limit
                     if self.total_downloaded_mb + file_size_mb > self.QUOTA_LIMIT_MB:
-                        # Upload what we have first
                         batch_uploaded = await self._upload_pending_files(download_path, channel_id, status_msg)
                         uploaded += batch_uploaded
                         
-                        # Switch proxy
-                        await status_msg.edit_text("🔄 Quota approaching, switching proxy...")
                         success = await self._switch_to_proxy(status_msg)
                         if not success:
                             break
-                        
                         proxy_switches += 1
+                        m = self.current_mega
                         batch_num += 1
                         batch_size_mb = 0
                     
-                    # Batch full — upload current batch first
+                    # Batch full — upload first
                     if batch_size_mb + file_size_mb > self.BATCH_SIZE_MB and batch_size_mb > 0:
                         await status_msg.edit_text(f"📤 Uploading Batch #{batch_num} ({batch_size_mb:.0f}MB)...")
                         batch_uploaded = await self._upload_pending_files(download_path, channel_id, status_msg)
@@ -305,34 +321,60 @@ class MegaHandler:
                         batch_num += 1
                         batch_size_mb = 0
                     
-                    # Download file
                     await status_msg.edit_text(
                         f"📥 [{idx}/{total_files}] `{file_name}` ({file_size_mb:.1f}MB)\n"
                         f"📦 Batch #{batch_num} ({batch_size_mb:.0f}/{self.BATCH_SIZE_MB}MB)\n"
-                        f"🔄 Proxy switches: {proxy_switches}"
+                        f"🔄 Proxies used: {proxy_switches}"
                     )
                     
-                    download_success = await self._try_download(
-                        file_id, file_info, mega_link, download_path,
-                        file_size_mb, status_msg
-                    )
-                    
-                    if download_success:
-                        batch_size_mb += file_size_mb
-                        self.total_downloaded_mb += file_size_mb
-                    else:
-                        failed += 1
+                    # Download
+                    try:
+                        loop = asyncio.get_event_loop()
+                        downloaded = await loop.run_in_executor(
+                            None, lambda fid=file_id, fi=file_info: m.download((fid, fi), download_path)
+                        )
+                        
+                        if downloaded:
+                            batch_size_mb += file_size_mb
+                            self.total_downloaded_mb += file_size_mb
+                        else:
+                            failed += 1
+                            
+                    except Exception as dl_err:
+                        error_msg = str(dl_err).lower()
+                        if any(w in error_msg for w in ["quota", "bandwidth", "limit", "509"]):
+                            # Upload what we have
+                            batch_uploaded = await self._upload_pending_files(download_path, channel_id, status_msg)
+                            uploaded += batch_uploaded
+                            
+                            success = await self._switch_to_proxy(status_msg)
+                            if success:
+                                m = self.current_mega
+                                proxy_switches += 1
+                                batch_size_mb = 0
+                                # Retry this file
+                                try:
+                                    downloaded = await loop.run_in_executor(
+                                        None, lambda: m.download((file_id, file_info), download_path)
+                                    )
+                                    if downloaded:
+                                        batch_size_mb += file_size_mb
+                                        self.total_downloaded_mb = file_size_mb
+                                except Exception:
+                                    failed += 1
+                            else:
+                                break
+                        else:
+                            failed += 1
                     
                     await asyncio.sleep(0.5)
                     
                 except Exception as e:
                     failed += 1
-                    logger.error(f"Error processing file {idx}: {e}")
-                    await asyncio.sleep(1)
+                    logger.error(f"Error file {idx}: {e}")
             
-            # Upload remaining files
+            # Upload remaining
             if os.path.exists(download_path) and os.listdir(download_path):
-                await status_msg.edit_text(f"📤 Uploading final batch...")
                 batch_uploaded = await self._upload_pending_files(download_path, channel_id, status_msg)
                 uploaded += batch_uploaded
             
@@ -344,7 +386,7 @@ class MegaHandler:
                 f"📁 Total: {total_files}\n"
                 f"📦 Batches: {batch_num}\n"
                 f"🔄 Proxy switches: {proxy_switches}\n"
-                f"🌐 Total downloaded: {self.total_downloaded_mb:.0f}MB"
+                f"🌐 Downloaded: {self.total_downloaded_mb:.0f}MB"
             )
         
         finally:
@@ -352,44 +394,67 @@ class MegaHandler:
                 shutil.rmtree(download_path, ignore_errors=True)
             self._clear_proxy()
 
-    async def _try_download(self, file_id, file_info, mega_link, download_path, file_size_mb, status_msg) -> bool:
-        """Try downloading a file, auto-switch proxy on quota error"""
-        max_proxy_retries = 5
-        
-        for attempt in range(max_proxy_retries):
+    async def _try_download_url(self, m, mega_link, download_path, status_msg, max_retries=5) -> str | None:
+        """Try downloading a URL, switch proxy on quota error"""
+        for attempt in range(max_retries):
             try:
-                m = self.current_mega
-                if file_id:
-                    downloaded = m.download((file_id, file_info), download_path)
-                else:
-                    downloaded = m.download_url(mega_link, download_path)
-                
-                return downloaded is not None
-                
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, lambda: m.download_url(mega_link, download_path)
+                )
+                return result
             except Exception as e:
                 error_msg = str(e).lower()
-                
-                if any(word in error_msg for word in ["quota", "bandwidth", "limit", "509"]):
-                    # Upload what we have before switching
-                    await status_msg.edit_text(
-                        f"⚠️ Quota hit! Uploading downloaded files first..."
-                    )
-                    
-                    # Switch to new proxy
+                if any(w in error_msg for w in ["quota", "bandwidth", "limit", "509"]):
+                    await status_msg.edit_text(f"⚠️ Quota hit, switching proxy (attempt {attempt+1})...")
                     success = await self._switch_to_proxy(status_msg)
-                    if not success:
-                        return False
-                    continue
+                    if success:
+                        m = self.current_mega
+                        continue
+                    else:
+                        return None
                 else:
-                    logger.error(f"Download error (non-quota): {e}")
-                    return False
+                    logger.error(f"Download error: {e}")
+                    return None
+        return None
+
+    async def _switch_to_proxy(self, status_msg: Message) -> bool:
+        """Switch to a new proxy"""
+        for retry in range(20):
+            proxy = await self.proxy_rotator.get_working_proxy(max_attempts=5)
+            
+            if proxy is None:
+                await status_msg.edit_text("🔄 Refreshing proxy list...")
+                count = await self.proxy_rotator.fetch_proxies()
+                if count == 0:
+                    await status_msg.edit_text("⏳ No proxies, waiting 5 min...")
+                    await asyncio.sleep(300)
+                    await self.proxy_rotator.fetch_proxies()
+                    continue
+                proxy = await self.proxy_rotator.get_working_proxy(max_attempts=5)
+                if proxy is None:
+                    continue
+            
+            await status_msg.edit_text(f"🔄 Trying proxy #{retry+1}...")
+            
+            try:
+                self._login_mega_sync(proxy=proxy)
+                self.total_downloaded_mb = 0
+                await status_msg.edit_text(
+                    f"✅ Connected via new proxy!\n"
+                    f"🔄 Proxies left: {self.proxy_rotator.get_proxy_count()}"
+                )
+                return True
+            except Exception:
+                self.proxy_rotator.mark_failed(proxy)
+                self._clear_proxy()
         
+        await status_msg.edit_text("❌ All proxies exhausted.")
         return False
 
     async def _upload_pending_files(self, download_path: str, channel_id: int, status_msg: Message) -> int:
-        """Upload all files in download folder to Telegram, then delete them"""
+        """Upload all files in download folder, then delete them"""
         uploaded = 0
-        
         if not os.path.exists(download_path):
             return 0
         
@@ -403,39 +468,30 @@ class MegaHandler:
                 file_name = os.path.basename(file_path)
                 await self._upload_to_channel(channel_id, file_path, file_name)
                 uploaded += 1
-                
                 if os.path.exists(file_path):
                     os.remove(file_path)
-                
                 await asyncio.sleep(2)
             except Exception as e:
-                logger.error(f"Upload error for {file_path}: {e}")
+                logger.error(f"Upload error: {e}")
                 if os.path.exists(file_path):
                     os.remove(file_path)
-                await asyncio.sleep(1)
         
         return uploaded
 
     async def _upload_to_channel(self, channel_id: int, file_path: str, file_name: str):
-        """Upload file to Telegram channel as photo/video (not document)"""
+        """Upload as photo/video (not document)"""
         mime_type, _ = mimetypes.guess_type(file_path)
         
         if mime_type and mime_type.startswith("image/"):
             await self.app.send_photo(
-                chat_id=channel_id,
-                photo=file_path,
-                caption=file_name
+                chat_id=channel_id, photo=file_path, caption=file_name
             )
         elif mime_type and mime_type.startswith("video/"):
             await self.app.send_video(
-                chat_id=channel_id,
-                video=file_path,
-                caption=file_name,
-                supports_streaming=True
+                chat_id=channel_id, video=file_path,
+                caption=file_name, supports_streaming=True
             )
         else:
             await self.app.send_document(
-                chat_id=channel_id,
-                document=file_path,
-                caption=file_name
+                chat_id=channel_id, document=file_path, caption=file_name
             )
