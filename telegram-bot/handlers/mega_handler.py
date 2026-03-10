@@ -33,7 +33,7 @@ class MegaHandler:
     def __init__(self, app: Client, user_states: dict):
         self.app = app
         self.user_states = user_states
-        self.BATCH_SIZE_MB = 200
+        self.BATCH_SIZE_MB = 300
         self.proxy_rotator = ProxyRotator()
         self.total_downloaded_mb = 0
 
