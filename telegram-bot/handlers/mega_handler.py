@@ -148,7 +148,7 @@ class MegaHandler:
         """Use megadl --path /dev/null --print-names or megals to list files"""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "megals", "--noprompt", "-l", "--human", mega_link,
+                "megals", "-l", "--human", "-n", mega_link,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
