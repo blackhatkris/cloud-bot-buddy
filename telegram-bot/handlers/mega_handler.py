@@ -424,15 +424,23 @@ class MegaHandler:
             stderr_task = asyncio.create_task(_monitor_stderr())
             
             # Monitor progress while process runs
+            proxy_info = "\n🌐 Proxy: active" if proxy else "\n🌐 Direct IP"
+            try:
+                await status_msg.edit_text(
+                    f"📥 **Download started...**{proxy_info}\n"
+                    f"📊 Downloaded: **0MB**\n"
+                    f"⏳ Waiting for data..."
+                )
+            except Exception:
+                pass
+            
             while proc.returncode is None:
                 try:
                     await asyncio.wait_for(asyncio.shield(stderr_task), timeout=5)
-                    # stderr_task finished (either EOF or quota hit)
                     break
                 except asyncio.TimeoutError:
                     pass
                 
-                # Check if process ended
                 if proc.returncode is not None:
                     break
                 
@@ -448,16 +456,15 @@ class MegaHandler:
                                 pass
                 
                 now = time.time()
-                if now - last_update >= 5 and current_size != last_size:
+                if now - last_update >= 5:
                     last_update = now
                     last_size = current_size
                     current_mb = current_size / (1024 * 1024)
-                    proxy_info = "\n🌐 Proxy: active" if proxy else ""
                     try:
                         await status_msg.edit_text(
-                            f"📥 **Downloading...**\n"
-                            f"📊 Downloaded: **{current_mb:.1f}MB**{proxy_info}\n"
-                            f"⏳ Working..."
+                            f"📥 **Downloading...**{proxy_info}\n"
+                            f"📊 Downloaded: **{current_mb:.1f}MB**\n"
+                            f"⏳ {'Receiving data...' if current_size > 0 else 'Connecting...'}"
                         )
                     except Exception:
                         pass
