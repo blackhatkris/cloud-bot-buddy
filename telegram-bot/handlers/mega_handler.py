@@ -36,8 +36,6 @@ class MegaHandler:
         self.BATCH_SIZE_MB = 200
         self.proxy_rotator = ProxyRotator()
         self.total_downloaded_mb = 0
-        # Install megatools on init
-        install_megatools()
 
     async def set_channel(self, message: Message):
         user_id = message.from_user.id
