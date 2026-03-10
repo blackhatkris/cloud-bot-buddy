@@ -145,10 +145,15 @@ class MegaHandler:
         )
 
     async def _get_folder_file_list(self, mega_link: str) -> list:
-        """Use megadl --path /dev/null --print-names or megals to list files"""
+        """Use megals to list files in folder"""
         try:
+            cmd = ["megals", "-l", "--human"]
+            if MEGA_EMAIL and MEGA_PASSWORD:
+                cmd.extend(["-u", MEGA_EMAIL, "-p", MEGA_PASSWORD])
+            cmd.append(mega_link)
+            
             proc = await asyncio.create_subprocess_exec(
-                "megals", "-l", "--human", "-n", mega_link,
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
