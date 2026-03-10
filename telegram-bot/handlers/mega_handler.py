@@ -367,7 +367,7 @@ class MegaHandler:
 
     async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
         """Download from Mega using megadl CLI tool"""
-        cmd = ["megadl", "--path", dest, url]
+        cmd = ["megadl", "--noprompt", "--path", dest, url]
         
         env = os.environ.copy()
         if proxy:
