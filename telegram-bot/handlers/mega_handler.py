@@ -6,7 +6,7 @@ import subprocess
 import logging
 from pyrogram import Client
 from pyrogram.types import Message
-from config import MAX_FILE_SIZE_MB, DOWNLOAD_DIR
+from config import MAX_FILE_SIZE_MB, DOWNLOAD_DIR, MEGA_EMAIL, MEGA_PASSWORD
 from handlers.proxy_rotator import ProxyRotator
 
 logger = logging.getLogger(__name__)
