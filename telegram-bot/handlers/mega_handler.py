@@ -148,7 +148,7 @@ class MegaHandler:
         """Use megadl --path /dev/null --print-names or megals to list files"""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "megals", "--noprompt", "-l", "--human", mega_link,
+                "megals", "-l", "--human", "-n", mega_link,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -367,7 +367,7 @@ class MegaHandler:
 
     async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
         """Download from Mega using megadl CLI tool"""
-        cmd = ["megadl", "--noprompt", "--path", dest, url]
+        cmd = ["megadl", "--no-ask-password", "--path", dest, url]
         
         env = os.environ.copy()
         if proxy:
