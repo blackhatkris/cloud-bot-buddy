@@ -370,8 +370,13 @@ class MegaHandler:
             if os.path.exists(download_path):
                 shutil.rmtree(download_path, ignore_errors=True)
 
-    async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None) -> bool:
-        """Download from Mega using megadl CLI tool with live progress"""
+    async def _megadl(self, url: str, dest: str, status_msg: Message, proxy: str = None, _depth: int = 0) -> bool:
+        """Download from Mega using megadl CLI tool with live progress.
+        Monitors stderr in real-time — kills process instantly on quota error."""
+        if _depth > 15:
+            logger.error("Max proxy retry depth reached")
+            return False
+        
         cmd = ["megadl", "--path", dest]
         if MEGA_EMAIL and MEGA_PASSWORD:
             cmd.extend(["-u", MEGA_EMAIL, "-p", MEGA_PASSWORD])
@@ -390,16 +395,48 @@ class MegaHandler:
                 env=env
             )
             
-            # Monitor download progress by checking folder size
+            quota_hit = False
+            
+            async def _monitor_stderr():
+                """Read stderr line by line, kill process on quota error"""
+                nonlocal quota_hit
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    text = line.decode().strip()
+                    if text:
+                        logger.warning(f"megadl: {text}")
+                    if any(w in text.lower() for w in ["over quota", "quota", "509"]):
+                        quota_hit = True
+                        logger.warning("Quota detected! Killing megadl immediately...")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return
+            
+            import time
             last_update = 0
             last_size = 0
+            
+            # Start stderr monitor
+            stderr_task = asyncio.create_task(_monitor_stderr())
+            
+            # Monitor progress while process runs
             while proc.returncode is None:
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
+                    await asyncio.wait_for(asyncio.shield(stderr_task), timeout=5)
+                    # stderr_task finished (either EOF or quota hit)
+                    break
                 except asyncio.TimeoutError:
-                    pass  # Still running, check progress
+                    pass
                 
-                # Calculate current download size
+                # Check if process ended
+                if proc.returncode is not None:
+                    break
+                
+                # Show progress
                 current_size = 0
                 if os.path.exists(dest):
                     for root, dirs, files in os.walk(dest):
@@ -410,16 +447,12 @@ class MegaHandler:
                             except OSError:
                                 pass
                 
-                current_mb = current_size / (1024 * 1024)
-                
-                # Update every 5 seconds and only if size changed
-                import time
                 now = time.time()
                 if now - last_update >= 5 and current_size != last_size:
                     last_update = now
                     last_size = current_size
-                    speed = ""
-                    proxy_info = f"\n🌐 Proxy: active" if proxy else ""
+                    current_mb = current_size / (1024 * 1024)
+                    proxy_info = "\n🌐 Proxy: active" if proxy else ""
                     try:
                         await status_msg.edit_text(
                             f"📥 **Downloading...**\n"
@@ -427,10 +460,54 @@ class MegaHandler:
                             f"⏳ Working..."
                         )
                     except Exception:
-                        pass  # Ignore edit errors (flood wait etc)
+                        pass
+            
+            # Wait for process to finish
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+            
+            await stderr_task  # Ensure stderr reader is done
+            
+            # QUOTA HIT — immediately switch proxy
+            if quota_hit:
+                if not proxy:
+                    try:
+                        await status_msg.edit_text("⚠️ **Quota hit on direct IP!** Switching to proxy...")
+                    except Exception:
+                        pass
+                    working_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
+                    if working_proxy:
+                        return await self._megadl(url, dest, status_msg, proxy=working_proxy, _depth=_depth+1)
+                    else:
+                        # Refresh proxies and try again
+                        await self.proxy_rotator.fetch_proxies()
+                        working_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
+                        if working_proxy:
+                            return await self._megadl(url, dest, status_msg, proxy=working_proxy, _depth=_depth+1)
+                else:
+                    try:
+                        await status_msg.edit_text(f"⚠️ Proxy quota hit, switching... (attempt {_depth+1})")
+                    except Exception:
+                        pass
+                    self.proxy_rotator.mark_failed(proxy)
+                    new_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
+                    if new_proxy:
+                        return await self._megadl(url, dest, status_msg, proxy=new_proxy, _depth=_depth+1)
+                    else:
+                        await self.proxy_rotator.fetch_proxies()
+                        new_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
+                        if new_proxy:
+                            return await self._megadl(url, dest, status_msg, proxy=new_proxy, _depth=_depth+1)
+                
+                try:
+                    await status_msg.edit_text("❌ All proxies exhausted. Try again later.")
+                except Exception:
+                    pass
+                return False
             
             if proc.returncode == 0:
-                # Show final size
                 final_size = 0
                 if os.path.exists(dest):
                     for root, dirs, files in os.walk(dest):
@@ -447,38 +524,13 @@ class MegaHandler:
                     pass
                 return True
             
-            stdout_data = await proc.stdout.read()
-            stderr_data = await proc.stderr.read()
-            error = stderr_data.decode().lower()
-            logger.error(f"megadl error: {stderr_data.decode()}")
-            
-            # Show error to user
+            # Other error
             try:
-                await status_msg.edit_text(f"⚠️ Download issue: `{stderr_data.decode()[:200]}`\nRetrying...")
-            except Exception:
-                pass
-            
-            if any(w in error for w in ["quota", "bandwidth", "limit", "over quota"]):
-                if not proxy:
-                    await status_msg.edit_text("⚠️ Quota hit! Switching to proxy...")
-                    working_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
-                    if working_proxy:
-                        return await self._megadl(url, dest, status_msg, proxy=working_proxy)
-                else:
-                    self.proxy_rotator.mark_failed(proxy)
-                    new_proxy = await self.proxy_rotator.get_working_proxy(max_attempts=10)
-                    if new_proxy:
-                        return await self._megadl(url, dest, status_msg, proxy=new_proxy)
-            
-            return False
-            
-        except asyncio.TimeoutError:
-            logger.error("megadl timed out after 10 min")
-            try:
-                await status_msg.edit_text("❌ Download timed out (10 min limit)")
+                await status_msg.edit_text(f"❌ megadl failed (exit code {proc.returncode})")
             except Exception:
                 pass
             return False
+            
         except Exception as e:
             logger.error(f"megadl exception: {e}")
             try:
