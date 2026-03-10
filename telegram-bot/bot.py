@@ -90,7 +90,7 @@ async def handle_text(client: Client, message: Message):
     elif current_state.startswith("forward_"):
         await forward_handler.handle_input(message)
     else:
-        await message.reply_text("Use /start to see available commands.")
+        pass  # Ignore random messages when no state is active
 
 
 print("🤖 Bot is starting...")
